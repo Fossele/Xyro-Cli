@@ -17,6 +17,7 @@
 import { confirmAction } from "../ui/prompts.js";
 import { isJsonMode } from "../ui/render.js";
 import { mcpNeedsApproval } from "../mcp/approvals.js";
+import { getPermissionMode, loadPermissions, matchesRule, addAllowRule } from "../config/permissions-store.js";
 
 /** Tools that never prompt (pure reads, planning, bookkeeping). */
 const ALLOW_ALWAYS = new Set([
@@ -92,8 +93,37 @@ const ASK_ALWAYS = new Set([
   "git_rebase",
 ]);
 
-export function shouldAskPermission(name: string): boolean {
+export function shouldAskPermission(name: string, args: Record<string, unknown> = {}): boolean {
   if (process.env.XYRO_NO_APPROVE) return false;
+  const mode = getPermissionMode();
+  const perms = loadPermissions();
+  
+  // Check deny rules first
+  if (perms.deny) {
+    for (const rule of perms.deny) {
+      if (matchesRule(rule, name, args)) return true; // still ask? No wait - deny means deny
+    }
+  }
+  // Check allow rules
+  if (perms.allow) {
+    for (const rule of perms.allow) {
+      if (matchesRule(rule, name, args)) return false;
+    }
+  }
+  
+  if (mode === "yolo") return false;
+  if (mode === "plan") {
+    // In plan mode, only allow read-only tools
+    if (ALLOW_ALWAYS.has(name)) return false;
+    return true; // ask/deny for mutating
+  }
+  if (mode === "accept-edits") {
+    if (ALLOW_ALWAYS.has(name)) return false;
+    if (name === "write_file" || name === "edit_file" || name === "multi_edit" || name === "apply_patch" || name === "propose_write_file") return false;
+    if (name.startsWith("mcp__")) return mcpNeedsApproval(name);
+    return ASK_ALWAYS.has(name);
+  }
+  
   if (ALLOW_ALWAYS.has(name)) return false;
   // MCP tools can act on the outside world (push, write a DB…): ask unless auto-approved
   if (name.startsWith("mcp__")) return mcpNeedsApproval(name);
