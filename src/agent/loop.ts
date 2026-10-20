@@ -445,7 +445,10 @@ export class Agent {
     this.client = createClient(opts.baseURL, opts.apiKey);
     this.model = opts.model || DEFAULT_MODEL;
     this.maxToolCalls = opts.maxToolCalls || DEFAULT_MAX_TOOL_CALLS;
-    this.history = new HistoryManager();
+        this.history = new HistoryManager();
+    if (getPermissionMode() === "plan") {
+      this.history.setPlanMode(true);
+    }
   }
 
   setModel(model: string): void {
@@ -511,6 +514,26 @@ export class Agent {
     if (!summary) return null;
     this.history.resetWithSummary(summary);
     return summary;
+  }
+
+
+  /** Cycle permission mode: ask -> accept-edits -> plan -> yolo -> ask */
+  cyclePermissionMode(): string {
+    const modes: Array<"ask" | "accept-edits" | "plan" | "yolo"> = ["ask", "accept-edits", "plan", "yolo"];
+    const current = getPermissionMode();
+    const idx = modes.indexOf(current);
+    const next = modes[(idx + 1) % modes.length];
+    setPermissionMode(next);
+    if (next === "plan") {
+      this.setPlanMode(true);
+    } else {
+      this.setPlanMode(false);
+    }
+    return next;
+  }
+
+  getCurrentPermissionMode(): string {
+    return getPermissionMode();
   }
 
   async run(input: string): Promise<void> {
