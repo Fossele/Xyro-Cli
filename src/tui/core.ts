@@ -103,7 +103,8 @@ export function tuiInit(onKey: (key: string) => void, onResize?: () => void, onM
   lastWidth = -1;
   lastHeight = -1;
   // Alt screen + hide cursor + button-event mouse tracking with SGR coordinates
-  OUT.write(`${ESC}?1049h${ESC}?25l${ESC}?1002h${ESC}?1006h${ESC}2J`);
+  // + bracketed paste so multi-line pastes arrive as text, not Enter keys.
+  OUT.write(`${ESC}?1049h${ESC}?25l${ESC}?1002h${ESC}?1006h${ESC}?2004h${ESC}2J`);
   if (process.stdin.isTTY) process.stdin.setRawMode(true);
   process.stdin.resume();
   keyHandler = onKey;
@@ -126,8 +127,8 @@ export function tuiInit(onKey: (key: string) => void, onResize?: () => void, onM
 export function tuiExit(): void {
   if (!initialized) return;
   initialized = false;
-  // Disable mouse tracking before leaving the alt screen
-  OUT.write(`${ESC}?1006l${ESC}?1002l${ESC}?25h${ESC}?1049l`);
+  // Disable bracketed paste + mouse tracking before leaving the alt screen
+  OUT.write(`${ESC}?2004l${ESC}?1006l${ESC}?1002l${ESC}?25h${ESC}?1049l`);
   if (process.stdin.isTTY) process.stdin.setRawMode(false);
   if (resizeListener) process.stdout.off("resize", resizeListener);
   inputBuf = "";
@@ -139,6 +140,16 @@ export function tuiExit(): void {
 
 export function tuiSize(): { width: number; height: number } {
   return { width, height };
+}
+
+/**
+ * Desktop notification through OSC 9 (iTerm2, WezTerm, kitty, Ghostty…).
+ * Unknown terminals ignore it; XYRO_NO_NOTIFY=1 disables it.
+ */
+export function notify(message: string): void {
+  if (!initialized || process.env.XYRO_NO_NOTIFY === "1") return;
+  const text = message.replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 300);
+  OUT.write(`${OSC}9;${text}\u0007`);
 }
 
 // Split a chunk into logical keystrokes (escape sequences stay whole)

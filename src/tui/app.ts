@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { SkillsModal, PluginsModal, SessionsModal, SkillRow, PluginRow, SessionRow } from "./capabilities.js";
 import { LanguagePicker } from "./language-picker.js";
+import { FilePicker } from "./file-picker.js";
 import { teamStrip, MINI_H, MINI_W } from "./expert-bots.js";
 import { instinctExpert } from "../agents/instinct.js";
 import { fitToScreen } from "./fit.js";
@@ -16,6 +17,7 @@ import {
   tuiSize,
   paintFrame,
   paintRowOverlay,
+  notify,
   setFrameFilter,
   ScrollRegion,
   span,
@@ -275,6 +277,10 @@ export class TuiApp {
   private themeId = "xyro";
   private onThemeChangeCb: ((id: string) => void) | null = null;
   private providerPicker = new ProviderPicker();
+  private filePicker = new FilePicker();
+  /** Bracketed-paste capture: text arrives token by token but must not submit. */
+  private pasting = false;
+  private pasteBuffer = "";
   private apiKey = "";
   private onProviderChangeCb: ((provider: Provider, apiKey: string, model: string, baseURL: string) => void) | null = null;
   private totalToolCalls = 0;
@@ -288,6 +294,10 @@ export class TuiApp {
   private lastFrameRows: RenderLine[] = [];
 
   constructor() {
+    this.filePicker.onSelect((path) => {
+      this.insertText(path + " ");
+    });
+    this.filePicker.onUpdate(() => this.render());
     this.commandPicker.onSelect((cmd) => {
       this.handleCommandSelect(cmd);
     });
@@ -526,6 +536,7 @@ export class TuiApp {
     if (this.quotaModal.isOpen()) return this.quotaModal.render(width);
     if (this.modelPicker.isOpen()) return this.modelPicker.render(width);
     if (this.commandPicker.isOpen()) return this.commandPicker.render(width);
+    if (this.filePicker.isOpen()) return this.filePicker.render(width);
     if (this.agentPicker.isOpen()) return this.agentPicker.render(width);
     if (this.languagePicker.isOpen()) return this.languagePicker.render(width);
     if (this.skillsModal.isOpen()) return this.skillsModal.render(width, tuiSize().height - 4);
@@ -540,9 +551,10 @@ export class TuiApp {
 
 
   /** Ask the user to approve a tool call; resolves true on "y". */
-  askPermission(label: string): Promise<boolean | "always"> {
+  askPermission(label: string, diff?: string[]): Promise<boolean | "always"> {
+    notify(`XYRO needs approval: ${label.slice(0, 120)}`);
     // Parallel experts may ask at once: show one prompt at a time, in order
-    const turn = this.permissionQueue.then(() => this.permissionModal.ask(label));
+    const turn = this.permissionQueue.then(() => this.permissionModal.ask(label, diff));
     this.permissionQueue = turn.then(
       () => undefined,
       () => undefined
@@ -1054,6 +1066,7 @@ export class TuiApp {
         this.showThinking();
       }
     } else {
+      const elapsed = this.turnStart ? Date.now() - this.turnStart : 0;
       this.clearThinking();
       this.endStream();
       // A turn that produced nothing (e.g. a slash command): drop the bare header
@@ -1063,6 +1076,8 @@ export class TuiApp {
       this.headerAt = -1;
       this.scroll.scrollToBottom();
       if (this.flashMood?.mood !== "error") this.flashMood = { mood: "happy", until: Date.now() + 2000 };
+      // Don't ping for slash commands; do for real work the user waited on.
+      if (this.turnStart && elapsed > 20_000) notify("XYRO finished this turn");
     }
     this.ensureTicker();
   }
@@ -1535,8 +1550,7 @@ export class TuiApp {
 
   /** Height of the current bottom stack (mirrors renderSession construction) */
   private currentBottomHeight(): number {
-    // busy/idle prompt = 6 rows, status rail = 1
-    return 6 + 1;
+    return (this.busy ? 6 : this.promptRows(false).length) + 1;
   }
 
   /** Prompt card width: full chat column in a session, up to 96 on home. */
@@ -1568,58 +1582,87 @@ export class TuiApp {
       span("│", { fg: color })
     );
 
-    // Row 3: Input text / placeholder with cyber cursor, after a ❯ prompt glyph
+    // Row 3+: input text / placeholder with cyber cursor, after a ❯ glyph.
+    // Multi-line drafts (Shift+Enter or a paste) grow the card up to 6 rows.
     const maxVisibleChars = Math.max(10, innerW - 6);
-    let contentSpans: StyledSpan[];
-    let usedW = 0;
+    const inputLines: RenderLine[] = [];
     if (!this.input) {
       const phFull = `sk anything ... "${PLACEHOLDERS[this.phIdx]}"`;
       const phText =
         phFull.length > maxVisibleChars - 1
           ? phFull.slice(0, maxVisibleChars - 4) + '..."'
           : phFull;
-      contentSpans = [
+      const contentSpans = [
         span("❯ ", { fg: color, bold: true, bg: t.backgroundElement }),
         span("A", { fg: t.background, bg: color, bold: true }),
         span(phText, { fg: tint(t.textMuted, 0.8), bg: t.backgroundElement }),
       ];
-      usedW = 3 + visualWidth(phText);
+      const usedW = 3 + visualWidth(phText);
+      const pad1 = Math.max(0, innerW - 2 - usedW);
+      inputLines.push(
+        line(
+          span(" ".repeat(leftMargin)),
+          span("│", { fg: color }),
+          span("  ", { bg: t.backgroundElement }),
+          ...contentSpans,
+          span(" ".repeat(pad1), { bg: t.backgroundElement }),
+          span("│", { fg: color })
+        )
+      );
     } else {
-      let visibleStart = 0;
-      if (this.cursorPos > maxVisibleChars - 5) {
-        visibleStart = this.cursorPos - (maxVisibleChars - 5);
+      const lines = this.input.split("\n");
+      const beforeCursor = this.input.slice(0, this.cursorPos);
+      const cursorLine = beforeCursor.split("\n").length - 1;
+      const cursorCol = beforeCursor.length - (beforeCursor.lastIndexOf("\n") + 1);
+      const visibleRows = 6;
+      const first = Math.max(0, Math.min(cursorLine, lines.length - visibleRows));
+      const last = Math.min(lines.length, first + visibleRows);
+      for (let li = first; li < last; li++) {
+        const full = lines[li];
+        const isCursor = li === cursorLine;
+        let visibleStart = 0;
+        if (isCursor && cursorCol > maxVisibleChars - 5) visibleStart = cursorCol - (maxVisibleChars - 5);
+        const visibleInput = full.slice(visibleStart, visibleStart + maxVisibleChars);
+        const relCursor = isCursor ? cursorCol - visibleStart : -1;
+        let contentSpans: StyledSpan[];
+        if (isCursor) {
+          const before = visibleInput.slice(0, Math.max(0, relCursor));
+          const at = visibleInput[relCursor] || " ";
+          const after = visibleInput.slice(Math.max(0, relCursor) + 1);
+          contentSpans = [
+            span(li === 0 ? "❯ " : "  ", { fg: color, bold: true, bg: t.backgroundElement }),
+            span(before, { fg: t.text, bold: true, bg: t.backgroundElement }),
+            span(at, { fg: t.background, bg: color, bold: true }),
+            span(after, { fg: t.text, bold: true, bg: t.backgroundElement }),
+          ];
+        } else {
+          contentSpans = [
+            span(li === 0 ? "❯ " : "  ", { fg: color, bold: true, bg: t.backgroundElement }),
+            span(visibleInput, { fg: t.text, bold: true, bg: t.backgroundElement }),
+          ];
+        }
+        const usedW = contentSpans.reduce((w, s) => w + visualWidth(s.text), 0);
+        const pad1 = Math.max(0, innerW - 2 - usedW);
+        inputLines.push(
+          line(
+            span(" ".repeat(leftMargin)),
+            span("│", { fg: color }),
+            span("  ", { bg: t.backgroundElement }),
+            ...contentSpans,
+            span(" ".repeat(pad1), { bg: t.backgroundElement }),
+            span("│", { fg: color })
+          )
+        );
       }
-      const visibleInput = this.input.slice(visibleStart, visibleStart + maxVisibleChars);
-      const relCursor = this.cursorPos - visibleStart;
-      const before = visibleInput.slice(0, relCursor);
-      const at = visibleInput[relCursor] || " ";
-      const after = visibleInput.slice(relCursor + 1);
-      contentSpans = [
-        span("❯ ", { fg: color, bold: true, bg: t.backgroundElement }),
-        span(before, { fg: t.text, bold: true, bg: t.backgroundElement }),
-        span(at, { fg: t.background, bg: color, bold: true }),
-        span(after, { fg: t.text, bold: true, bg: t.backgroundElement }),
-      ];
-      usedW = 2 + visualWidth(before) + visualWidth(at) + visualWidth(after);
     }
-    const pad1 = Math.max(0, innerW - 2 - usedW);
-
-    const inputLine = line(
-      span(" ".repeat(leftMargin)),
-      span("│", { fg: color }),
-      span("  ", { bg: t.backgroundElement }),
-      ...contentSpans,
-      span(" ".repeat(pad1), { bg: t.backgroundElement }),
-      span("│", { fg: color })
-    );
 
     // Row 4: contextual hint (model/provider now live in the status rail)
     const hintParts: [string, string][] = this.input
-      ? [["enter", "send"], ["ctrl+u", "clear"], ["↑", "history"]]
+      ? this.input.includes("\n")
+        ? [["enter", "send"], ["⇧↵", "newline"], ["ctrl+u", "clear"]]
+        : [["enter", "send"], ["⇧↵", "newline"], ["↑", "history"]]
       : centered
         ? [["enter", "send"], ["↑", "history"], ["ctrl+u", "clear"]] // home: the chips below cover commands
-        : centered
-        ? [["enter", "send"], ["↑", "history"]] // home: the chips below already show / and tab
         : [["/", "commands"], ["tab", "mode"], ["↑", "history"], ["enter", "send"]];
     const hintSpans: StyledSpan[] = [];
     hintParts.forEach(([k, l], i) => {
@@ -1644,7 +1687,7 @@ export class TuiApp {
       span("╯", { fg: color })
     );
 
-    return [topBorderLine, topPaddingLine, inputLine, topPaddingLine, metaLine, btmBorderLine];
+    return [topBorderLine, topPaddingLine, ...inputLines, topPaddingLine, metaLine, btmBorderLine];
   }
 
   // Busy state prompt rows: Knight-Rider brand scanner replaces input text
@@ -1755,7 +1798,7 @@ export class TuiApp {
   private anyOverlayOpen(): boolean {
     return [
       this.permissionModal, this.updatePopup, this.expertsModal, this.rewindModal, this.hooksModal, this.mcpModal, this.quotaModal,
-      this.modelPicker, this.commandPicker, this.agentPicker, this.themePicker, this.languagePicker, this.skillsModal, this.sessionsModal, this.pluginsModal, this.providerPicker, this.statusModal, this.costModal,
+      this.modelPicker, this.commandPicker, this.filePicker, this.agentPicker, this.themePicker, this.languagePicker, this.skillsModal, this.sessionsModal, this.pluginsModal, this.providerPicker, this.statusModal, this.costModal,
     ].some((m) => m.isOpen());
   }
 
@@ -1769,6 +1812,7 @@ export class TuiApp {
     if (this.quotaModal.isOpen()) { this.quotaModal.close(); return true; }
     if (this.modelPicker.isOpen()) { this.modelPicker.close(); return true; }
     if (this.commandPicker.isOpen()) { this.commandPicker.close(); return true; }
+    if (this.filePicker.isOpen()) { this.filePicker.close(); return true; }
     if (this.agentPicker.isOpen()) { this.agentPicker.close(); return true; }
     if (this.languagePicker.isOpen()) { this.languagePicker.close(); return true; }
     if (this.skillsModal.isOpen()) { this.skillsModal.close(); return true; }
@@ -1847,6 +1891,24 @@ export class TuiApp {
   private handleKey(key: string): void {
     const cp = key.codePointAt(0) || 0;
 
+    // Bracketed paste: keep every character (including newlines) as text.
+    if (key === "\u001b[200~") {
+      if (this.introStart) this.finishIntro();
+      this.pasting = true;
+      this.pasteBuffer = "";
+      return;
+    }
+    if (this.pasting) {
+      if (key === "\u001b[201~") {
+        this.pasting = false;
+        this.insertText(this.pasteBuffer);
+        this.pasteBuffer = "";
+      } else {
+        this.pasteBuffer += key;
+      }
+      return;
+    }
+
     // Any key skips the first-launch intro
     if (this.introStart) {
       this.finishIntro();
@@ -1898,6 +1960,10 @@ export class TuiApp {
     }
     if (this.commandPicker.isOpen()) {
       this.commandPicker.handleKey(key);
+      return;
+    }
+    if (this.filePicker.isOpen()) {
+      this.filePicker.handleKey(key);
       return;
     }
     if (this.agentPicker.isOpen()) {
@@ -2063,6 +2129,12 @@ export class TuiApp {
       return;
     }
 
+    // Shift+Enter (kitty / modifyOtherKeys / xterm) inserts a newline
+    if (key === "\u001b[13;2u" || key === "\u001b\r" || key === "\u001b[27;2;13~" || cp === 10) {
+      this.insertText("\n");
+      return;
+    }
+
     // Enter
     if (cp === 13) {
       this.closeAnyOverlay();
@@ -2194,11 +2266,28 @@ export class TuiApp {
       return;
     }
 
+    // "@" at the start of a word opens the fuzzy project-file picker
+    if (key === "@" && !this.busy && (this.cursorPos === 0 || /\s/.test(this.input[this.cursorPos - 1]))) {
+      this.filePicker.open(this.cwd);
+      return;
+    }
+
     // Normal typing
     if (!this.busy) {
-      this.input = this.input.slice(0, this.cursorPos) + key + this.input.slice(this.cursorPos);
-      this.cursorPos += key.length;
+      this.insertText(key);
     }
+  }
+
+  /** Insert text at the caret (multi-line aware, control characters stripped). */
+  private insertText(raw: string): void {
+    if (this.busy) return;
+    const text = raw
+      .replace(/\r\n?/g, "\n")
+      .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "")
+      .slice(0, 200_000);
+    if (!text) return;
+    this.input = this.input.slice(0, this.cursorPos) + text + this.input.slice(this.cursorPos);
+    this.cursorPos += text.length;
   }
 }
 

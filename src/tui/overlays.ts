@@ -557,15 +557,15 @@ export class CostModal {
 // ─────────────────────────────────────────────────────────────────────────────
 
 export class PermissionModal {
-  private request: { label: string; resolve: (ok: boolean | "always") => void } | null = null;
+  private request: { label: string; diff?: string[]; resolve: (ok: boolean | "always") => void } | null = null;
 
   isOpen(): boolean { return this.request !== null; }
 
-  ask(label: string): Promise<boolean | "always"> {
+  ask(label: string, diff?: string[]): Promise<boolean | "always"> {
     // A new request supersedes (and denies) any stale one
     this.request?.resolve(false);
     return new Promise((resolve) => {
-      this.request = { label, resolve };
+      this.request = { label, diff, resolve };
     });
   }
 
@@ -596,6 +596,27 @@ export class PermissionModal {
       [span("   XYRO wants to run:", { fg: tint(t.textMuted, 0.95) })],
       [],
       ...wrapSpans([span(label, { fg: t.text, bold: true })], boxW - 8).map((w) => [span("   "), ...w.spans]),
+    ];
+    const diff = this.request.diff;
+    if (diff && diff.length) {
+      body.push([]);
+      body.push([span("   Changes:", { fg: tint(t.textMuted, 0.95) })]);
+      const shown = diff.slice(0, 18);
+      for (const line of shown) {
+        const fg = line.startsWith("+") && !line.startsWith("+++")
+          ? t.success
+          : line.startsWith("-") && !line.startsWith("---")
+            ? t.error
+            : line.startsWith("@@")
+              ? BRAND_BLUE
+              : tint(t.textMuted, 0.85);
+        body.push(...wrapSpans([span(line, { fg })], boxW - 8).map((w) => [span("   "), ...w.spans]));
+      }
+      if (diff.length > shown.length) {
+        body.push([span(`   … ${diff.length - shown.length} more diff lines`, { fg: tint(t.textMuted, 0.7), italic: true })]);
+      }
+    }
+    body.push(
       [],
       [
         span("   "),
@@ -605,7 +626,7 @@ export class PermissionModal {
         span("    "),
         span(" n  deny ", { fg: t.error, bg: t.backgroundElement, bold: true }),
       ],
-    ];
+    );
     return modalFrame("Allow this action?", boxW, body, "y allow · a always allow · n deny · esc deny", BRAND_AMBER);
   }
 }

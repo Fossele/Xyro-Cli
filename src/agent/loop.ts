@@ -13,6 +13,7 @@ import { executeTool, getPlanModeToolDefinitions } from "../tools/registry.js";
 import { END_TURN_TOOL_NAMES } from "../tools/end_turn.js";
 import { requestPermission, permissionVerdict, describeToolCall, PERMISSION_DENIED_RESULT, PERMISSION_BLOCKED_RESULT } from "../tools/permissions.js";
 import { getPermissionMode, setPermissionMode, addAllowRule, ruleFor } from "../config/permissions-store.js";
+import { previewToolDiff } from "../tools/preview.js";
 import { DEFAULT_MODEL, DEFAULT_MAX_TOOL_CALLS, CONTEXT_WINDOW_WARN_TOKENS, POST_TURN_COMPACT_TOKENS } from "../config/constants.js";
 import {
   renderAssistant,
@@ -47,8 +48,9 @@ export interface AgentOutput {
   /** A short status line (intent guard, privacy shield…) */
   onNotice?(text: string, kind: "info" | "warn"): void;
   /** Ask the user to approve a mutating/exec tool call (TUI modal).
-   *  "always" persists an allow rule for this exact call. */
-  requestPermission?(label: string): Promise<boolean | "always">;
+   *  "always" persists an allow rule for this exact call; diff is a plain
+   *  unified diff for write/edit previews. */
+  requestPermission?(label: string, diff?: string[]): Promise<boolean | "always">;
   /** The permission mode changed (plan approved, Shift+Tab, …). */
   onPermissionMode?(mode: "ask" | "accept-edits" | "plan" | "yolo"): void;
 }
@@ -769,7 +771,8 @@ export class Agent {
         if (verdict === "ask") {
           if (this.output) {
             if (this.output.requestPermission) {
-              const answer = await this.output.requestPermission(describeToolCall(name, args));
+              const diff = previewToolDiff(name, args) ?? undefined;
+              const answer = await this.output.requestPermission(describeToolCall(name, args), diff);
               if (answer === "always") {
                 addAllowRule(ruleFor(name, args));
                 allowed = true;
