@@ -47,6 +47,7 @@ import { MascotMood } from "./mascot.js";
 import { composeModal, MODAL_OPEN_MS, MODAL_CLOSE_MS } from "./modal.js";
 import { renderSidePanel, teamBots, panelVisible, panelWidth, PanelHit, PlanView } from "./side-panel.js";
 import type { TodoView, PlanRequest, PlanDecision, AgentActivity } from "../agent/ui-bridge.js";
+import type { PermissionMode } from "../config/permissions-store.js";
 import { getExperts } from "../agents/experts.js";
 import { readMemory } from "../agents/router.js";
 import { expertModel, expertBudget, setExpertModel } from "../agents/team-config.js";
@@ -250,6 +251,8 @@ export class TuiApp {
   private onLinkRequestCb: ((text: string) => void) | null = null;
   private onLanguageRequestCb: (() => void) | null = null;
   private onStopCb: (() => boolean) | null = null;
+  private onPermissionModeCycleCb: (() => void) | null = null;
+  private permissionMode: PermissionMode = "ask";
   private stopping = false;
   private linkedPeers = 0;
   private homeNotice: { label: string; text: string } | null = null;
@@ -341,6 +344,14 @@ export class TuiApp {
   }
   onAgentModeChange(cb: (mode: AgentModeDef) => void): void {
     this.onAgentModeChangeCb = cb;
+  }
+  /** Shift+Tab: ask -> accept-edits -> plan -> yolo -> ask */
+  onPermissionModeCycle(cb: () => void): void {
+    this.onPermissionModeCycleCb = cb;
+  }
+  setPermissionMode(mode: PermissionMode): void {
+    this.permissionMode = mode;
+    this.render();
   }
   onThemeChange(cb: (id: string) => void): void {
     this.onThemeChangeCb = cb;
@@ -526,7 +537,7 @@ export class TuiApp {
 
 
   /** Ask the user to approve a tool call; resolves true on "y". */
-  askPermission(label: string): Promise<boolean> {
+  askPermission(label: string): Promise<boolean | "always"> {
     // Parallel experts may ask at once: show one prompt at a time, in order
     const turn = this.permissionQueue.then(() => this.permissionModal.ask(label));
     this.permissionQueue = turn.then(
@@ -1739,9 +1750,21 @@ export class TuiApp {
     }
     const fmtTok = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
 
+    const mode = this.permissionMode;
+    const modeChip =
+      mode === "yolo"
+        ? { label: " YOLO ", bg: t.error, fg: t.background }
+        : mode === "plan"
+          ? { label: " PLAN ", bg: BRAND.lemon, fg: t.background }
+          : mode === "accept-edits"
+            ? { label: " EDIT ", bg: t.success, fg: t.background }
+            : { label: " ASK ", bg: tint(t.textMuted, 0.35), fg: t.text };
+
     const left: StyledSpan[] = [
       span(" "),
       span(` ${this.agentName.toUpperCase()} `, { fg: t.background, bg: color, bold: true }),
+      span("  "),
+      span(modeChip.label, { fg: modeChip.fg, bg: modeChip.bg, bold: true }),
       span("  "),
       span(this.model || "no model", { fg: t.text, bold: true }),
       ...(this.provider ? [span("  " + this.provider.replace(/\s*\(.*\)$/, ""), { fg: dim })] : []),
@@ -1878,6 +1901,12 @@ export class TuiApp {
     if (cp === 16) {
       if (this.commandPicker.isOpen()) this.commandPicker.close();
       else this.openCommandPicker();
+      return;
+    }
+
+    // Shift+Tab: cycle permission modes (ask → accept-edits → plan → yolo)
+    if (key === "\u001b[Z") {
+      this.onPermissionModeCycleCb?.();
       return;
     }
 

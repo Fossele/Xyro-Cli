@@ -65,7 +65,7 @@ export interface AgentActivity {
 }
 
 let agentListener: ((a: AgentActivity) => void) | null = null;
-let toolApprover: ((label: string) => Promise<boolean>) | null = null;
+let toolApprover: ((label: string) => Promise<boolean | "always">) | null = null;
 
 export function onAgentActivity(fn: ((a: AgentActivity) => void) | null): void {
   agentListener = fn;
@@ -76,10 +76,10 @@ export function emitAgentActivity(a: AgentActivity): void {
 }
 
 /** UI hook used by experts to ask the user before risky tools (null → caller decides). */
-export function setToolApprover(fn: ((label: string) => Promise<boolean>) | null): void {
+export function setToolApprover(fn: ((label: string) => Promise<boolean | "always">) | null): void {
   toolApprover = fn;
 }
 
-export function getToolApprover(): ((label: string) => Promise<boolean>) | null {
+export function getToolApprover(): ((label: string) => Promise<boolean | "always">) | null {
   return toolApprover;
 }

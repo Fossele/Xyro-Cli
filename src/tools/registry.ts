@@ -874,7 +874,10 @@ const READ_PATH_TOOLS = new Set(["read_file", "ast_inspect_file"]);
 async function askOutsideRead(folder: string): Promise<boolean> {
   const label = `Read outside the project: ${folder}`;
   const ui = getToolApprover();
-  if (ui) return ui(label);
+  if (ui) {
+    const answer = await ui(label);
+    return answer === true || answer === "always";
+  }
   if (process.env.XYRO_ALLOW_OUTSIDE === "1") return true;
   if (!canPromptUser()) return false; // scripts / CI: never wander off
   return (await requestPermission("read_outside_project", { path: folder })) === "allow";

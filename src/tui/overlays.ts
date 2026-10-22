@@ -557,11 +557,11 @@ export class CostModal {
 // ─────────────────────────────────────────────────────────────────────────────
 
 export class PermissionModal {
-  private request: { label: string; resolve: (ok: boolean) => void } | null = null;
+  private request: { label: string; resolve: (ok: boolean | "always") => void } | null = null;
 
   isOpen(): boolean { return this.request !== null; }
 
-  ask(label: string): Promise<boolean> {
+  ask(label: string): Promise<boolean | "always"> {
     // A new request supersedes (and denies) any stale one
     this.request?.resolve(false);
     return new Promise((resolve) => {
@@ -569,7 +569,7 @@ export class PermissionModal {
     });
   }
 
-  private settle(ok: boolean): void {
+  private settle(ok: boolean | "always"): void {
     const req = this.request;
     this.request = null;
     req?.resolve(ok);
@@ -582,6 +582,7 @@ export class PermissionModal {
     if (!this.request) return false;
     const k = key.toLowerCase();
     if (k === "y") this.settle(true);
+    else if (k === "a") this.settle("always");
     else if (k === "n" || key === "\u001b" || (key.codePointAt(0) ?? 0) === 3) this.settle(false);
     return true;
   }
@@ -596,9 +597,16 @@ export class PermissionModal {
       [],
       ...wrapSpans([span(label, { fg: t.text, bold: true })], boxW - 8).map((w) => [span("   "), ...w.spans]),
       [],
-      [span("   "), span(" y  allow ", { fg: t.background, bg: t.success, bold: true }), span("    "), span(" n  deny ", { fg: t.error, bg: t.backgroundElement, bold: true })],
+      [
+        span("   "),
+        span(" y  allow ", { fg: t.background, bg: t.success, bold: true }),
+        span("    "),
+        span(" a  always allow ", { fg: t.background, bg: BRAND_LEMON, bold: true }),
+        span("    "),
+        span(" n  deny ", { fg: t.error, bg: t.backgroundElement, bold: true }),
+      ],
     ];
-    return modalFrame("Allow this action?", boxW, body, "y allow · n deny · esc deny", BRAND_AMBER);
+    return modalFrame("Allow this action?", boxW, body, "y allow · a always allow · n deny · esc deny", BRAND_AMBER);
   }
 }
 
