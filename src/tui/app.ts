@@ -48,6 +48,7 @@ import { composeModal, MODAL_OPEN_MS, MODAL_CLOSE_MS } from "./modal.js";
 import { renderSidePanel, teamBots, panelVisible, panelWidth, PanelHit, PlanView } from "./side-panel.js";
 import type { TodoView, PlanRequest, PlanDecision, AgentActivity } from "../agent/ui-bridge.js";
 import type { PermissionMode } from "../config/permissions-store.js";
+import { getToolCount } from "../tools/registry.js";
 import { getExperts } from "../agents/experts.js";
 import { readMemory } from "../agents/router.js";
 import { expertModel, expertBudget, setExpertModel } from "../agents/team-config.js";
@@ -209,6 +210,8 @@ export class TuiApp {
   private phIdx = 0;
   private tipIdx = 0;
   private animTimer: ReturnType<typeof setInterval> | null = null;
+  private renderTimer: ReturnType<typeof setTimeout> | null = null;
+  private renderPending = false;
   private animTick = 0;
   private busy = false;
   private turnStart = 0;
@@ -468,7 +471,7 @@ export class TuiApp {
       gitBranch: this.gitBranch,
       messagesCount: this.totalMessages,
       toolCallsCount: this.totalToolCalls,
-      toolsCount: { total: 12, builtin: 10, plugins: 2 },
+      toolsCount: getToolCount(),
       mcpCount: this.mcpCount,
       version: this.version,
     });
@@ -725,20 +728,13 @@ export class TuiApp {
 
   start(): void {
     tuiInit(
-      (key) => this.handleKey(key),
+      (key) => {
+        this.handleKey(key);
+        this.render();
+      },
       () => this.render(),
       (e) => this.handleMouse(e)
     );
-    this.animTimer = setInterval(() => {
-      this.animTick++;
-      if (this.animTick % 50 === 0) {
-        this.phIdx = (this.phIdx + 1) % PLACEHOLDERS.length;
-      }
-      if (this.animTick % 100 === 0) {
-        this.tipIdx = (this.tipIdx + 1) % TIPS.length;
-      }
-      this.render();
-    }, SPINNER_MS);
 
     // First launch: play the mascot intro at ~30fps (XYRO_INTRO=1 forces a replay)
     const forceIntro = process.env.XYRO_INTRO === "1";
@@ -748,6 +744,7 @@ export class TuiApp {
     } else {
       this.maybeStartOnboarding();
     }
+    this.ensureTicker();
     this.render();
   }
 
@@ -809,7 +806,11 @@ export class TuiApp {
     if (this.introTimer) clearInterval(this.introTimer);
     if (this.modalTimer) clearInterval(this.modalTimer);
     if (this.animTimer) clearInterval(this.animTimer);
+    if (this.renderTimer) clearTimeout(this.renderTimer);
     this.animTimer = null;
+    this.modalTimer = null;
+    this.renderTimer = null;
+    this.renderPending = false;
     tuiExit();
   }
 
@@ -1038,6 +1039,7 @@ export class TuiApp {
     this.endStream();
     this.scroll.append(emptyLine());
     this.scroll.appendAll(errorMessage(text, this.chatWidth()));
+    this.ensureTicker();
   }
 
   setBusy(b: boolean): void {
@@ -1062,6 +1064,7 @@ export class TuiApp {
       this.scroll.scrollToBottom();
       if (this.flashMood?.mood !== "error") this.flashMood = { mood: "happy", until: Date.now() + 2000 };
     }
+    this.ensureTicker();
   }
 
   /** Refresh live transcript rows for the current frame. */
@@ -1201,7 +1204,55 @@ export class TuiApp {
     setFrameFilter(modal ? (frame, w, h) => composeModal(frame, modal.rows, w, h, progress) : null);
   }
 
+  /** Does the current screen have something that must animate on its own? */
+  private needsAnimation(): boolean {
+    if (this.busy || this.stopping) return true;
+    if (this.flashMood && Date.now() < this.flashMood.until) return true;
+    if (this.selection.hasToast()) return true;
+    return false;
+  }
+
+  /**
+   * Own the only recurring timer. It runs while spinners / streaming / a
+   * mascot reaction need frames and stops as soon as the screen is static, so
+   * an idle XYRO costs 0 fps and writes 0 bytes.
+   */
+  private ensureTicker(): void {
+    if (this.animTimer || this.introStart) return;
+    if (!this.needsAnimation()) return;
+    this.animTimer = setInterval(() => {
+      this.animTick++;
+      if (this.animTick % 50 === 0) {
+        this.phIdx = (this.phIdx + 1) % PLACEHOLDERS.length;
+      }
+      if (this.animTick % 100 === 0) {
+        this.tipIdx = (this.tipIdx + 1) % TIPS.length;
+      }
+      this.render();
+      if (!this.needsAnimation()) {
+        if (this.animTimer) clearInterval(this.animTimer);
+        this.animTimer = null;
+      }
+    }, SPINNER_MS);
+  }
+
+  /**
+   * Coalesce render requests into one frame per event-loop turn. Key presses,
+   * stream chunks and timers can all ask for a repaint without writing the
+   * terminal several times.
+   */
   private render(): void {
+    this.ensureTicker();
+    if (this.renderPending) return;
+    this.renderPending = true;
+    this.renderTimer = setTimeout(() => {
+      this.renderPending = false;
+      this.renderTimer = null;
+      this.paintNow();
+    }, 0);
+  }
+
+  private paintNow(): void {
     this.updateModal();
     if (this.view.view !== "home") this.finishIntro();
     if (this.view.view === "home") this.renderHome();
