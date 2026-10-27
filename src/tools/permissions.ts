@@ -17,6 +17,12 @@
 import { confirmAction } from "../ui/prompts.js";
 import { isJsonMode } from "../ui/render.js";
 import { mcpNeedsApproval } from "../mcp/approvals.js";
+import { getPermissionMode, loadPermissions, matchesRule, type PermissionMode } from "../config/permissions-store.js";
+
+export type PermissionVerdict = "allow" | "ask" | "deny";
+
+/** Edit tools that run without a prompt in accept-edits mode. */
+const EDIT_TOOLS = new Set(["write_file", "edit_file", "multi_edit", "apply_patch", "propose_write_file"]);
 
 /** Tools that never prompt (pure reads, planning, bookkeeping). */
 const ALLOW_ALWAYS = new Set([
@@ -92,12 +98,49 @@ const ASK_ALWAYS = new Set([
   "git_rebase",
 ]);
 
-export function shouldAskPermission(name: string): boolean {
-  if (process.env.XYRO_NO_APPROVE) return false;
-  if (ALLOW_ALWAYS.has(name)) return false;
+export function permissionVerdict(name: string, args: Record<string, unknown> = {}): PermissionVerdict {
+  if (process.env.XYRO_NO_APPROVE) return "allow";
+  const mode: PermissionMode = getPermissionMode();
+  const perms = loadPermissions();
+
+  // Explicit deny rules win over everything: "deny" must never become a prompt
+  // the user can approve by mistake.
+  for (const rule of perms.deny ?? []) {
+    if (matchesRule(rule, name, args)) return "deny";
+  }
+  // Explicit allow rules (e.g. "run_command(npm test)") run without asking.
+  // Plan mode stays read-only even when a broad allow rule exists.
+  if (mode !== "plan") {
+    for (const rule of perms.allow ?? []) {
+      if (matchesRule(rule, name, args)) return "allow";
+    }
+  }
+
+  if (mode === "yolo") return "allow";
+  if (mode === "plan") {
+    // Plan mode is read-only: mutating tools are blocked, not merely prompted.
+    return ALLOW_ALWAYS.has(name) || name === "exit_plan" ? "allow" : "deny";
+  }
+  if (mode === "accept-edits") {
+    if (ALLOW_ALWAYS.has(name)) return "allow";
+    if (EDIT_TOOLS.has(name)) return "allow";
+    if (name.startsWith("mcp__")) return mcpNeedsApproval(name) ? "ask" : "allow";
+    return ASK_ALWAYS.has(name) ? "ask" : "allow";
+  }
+
+  if (ALLOW_ALWAYS.has(name)) return "allow";
   // MCP tools can act on the outside world (push, write a DB…): ask unless auto-approved
-  if (name.startsWith("mcp__")) return mcpNeedsApproval(name);
-  return ASK_ALWAYS.has(name);
+  if (name.startsWith("mcp__")) return mcpNeedsApproval(name) ? "ask" : "allow";
+  return ASK_ALWAYS.has(name) ? "ask" : "allow";
+}
+
+/**
+ * Backwards-compatible boolean: true when the caller must prompt the user.
+ * A deny rule returns false here — callers that care about blocking must use
+ * `permissionVerdict` (the agent loop and the expert runtime do).
+ */
+export function shouldAskPermission(name: string, args: Record<string, unknown> = {}): boolean {
+  return permissionVerdict(name, args) === "ask";
 }
 
 export function canPromptUser(): boolean {
@@ -142,3 +185,6 @@ export async function requestPermission(
 
 export const PERMISSION_DENIED_RESULT =
   "⛔ Permission denied by user. Do NOT retry this tool call unchanged. Adjust your approach or ask the user for confirmation.";
+
+export const PERMISSION_BLOCKED_RESULT =
+  "⛔ Blocked by a deny rule in .xyro/settings.json. Do NOT retry this tool call. Tell the user which rule blocked it and ask them to change it if the action is intended.";

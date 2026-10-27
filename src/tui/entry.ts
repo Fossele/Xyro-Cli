@@ -50,6 +50,7 @@ import { isDailyLimitError, dailyLimitMessage } from "../providers/pool.js";
 import { TuiApp } from "./app.js";
 import { interactiveSetup, FREE_PROVIDERS } from "../ui/prompts.js";
 import { loadPersistedConfig, savePersistedConfig, saveProviderKey, getProviderKey } from "../config/persist.js";
+import { getPermissionMode } from "../config/permissions-store.js";
 import { recordRecentModel } from "../models/recents.js";
 
 export async function runTuiMode(opts: {
@@ -127,6 +128,7 @@ export async function runTuiMode(opts: {
   const tui = new TuiApp();
   tui.setMeta(model, provider);
   tui.setApiKey(apiKey);
+  tui.setPermissionMode(getPermissionMode());
   recordRecentModel(model);
 
   let goneModel: { from: string; to: string } | null = null;
@@ -136,6 +138,7 @@ export async function runTuiMode(opts: {
     onToolStart: (name, summary) => tui.addToolRunning(name, summary),
     onToolResult: (name, summary, elapsed, failed) => tui.addToolDone(name, summary, elapsed, failed),
     requestPermission: (label) => tui.askPermission(label),
+    onPermissionMode: (mode) => tui.setPermissionMode(mode),
     onNotice: (text, kind) => tui.addNotice(text, kind),
     onDispatch: (team) => tui.setDispatch(team),
     onModelSwitched: (sw) => {
@@ -320,9 +323,22 @@ export async function runTuiMode(opts: {
     syncStats();
   });
 
+  tui.onPermissionModeCycle(() => {
+    const mode = agent.cyclePermissionMode();
+    const desc =
+      mode === "plan"
+        ? "read-only: no edits, no commands"
+        : mode === "accept-edits"
+          ? "file edits run without asking; commands still ask"
+          : mode === "yolo"
+            ? "everything runs without asking — be careful"
+            : "ask before mutating tools";
+    tui.addNotice(`Permission mode: **${mode.toUpperCase()}** — ${desc}`, mode === "yolo" ? "warn" : "info");
+  });
+
   tui.onAgentModeChange((mode) => {
     // "Plan" persona = read-only plan mode; any other persona can act
-    agent.setPlanMode(mode.name.toLowerCase() === "plan");
+    agent.applyPermissionMode(mode.name.toLowerCase() === "plan" ? "plan" : "ask");
     tui.addNotice(`Switched agent persona to **${mode.name}** mode: *${mode.desc}*`);
   });
 

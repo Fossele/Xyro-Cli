@@ -77,9 +77,9 @@
 
 ### Agent & context
 - [ ] Load `XYRO.md` / `AGENTS.md` / `CLAUDE.md` hierarchically (user → repo root → subdir), inject into system prompt; `#` prefix appends a memory.
-- [ ] Plan mode: read-only tool subset, ends with an `exit_plan` tool that renders the plan for approval.
-- [ ] Permission modes cycled with **Shift+Tab**: `ask` → `accept-edits` → `plan` → `yolo`; shown in footer.
-- [ ] Persisted permission rules: `.xyro/settings.json` → `{"allow": ["run_command(npm test*)"], "deny": [...]}`. "Always allow this" option in the approval modal.
+- [x] Plan mode: read-only tool subset, ends with an `exit_plan` tool that renders the plan for approval.
+- [x] Permission modes cycled with **Shift+Tab**: `ask` → `accept-edits` → `plan` → `yolo`; shown in footer.
+- [x] Persisted permission rules: `.xyro/settings.json` → `{"allow": ["run_command(npm test*)"], "deny": [...]}`. "Always allow this" option in the approval modal.
 - [ ] Checkpoints: snapshot touched files before each turn (shadow git repo under `~/.local/share/xyro/checkpoints`), `/rewind` + Esc Esc picker.
 - [ ] Prompt caching for Anthropic (`cache_control` on system + tools) and OpenAI (stable prefix ordering).
 - [ ] Show reasoning/thinking tokens in a collapsible dim block.

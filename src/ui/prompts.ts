@@ -126,7 +126,7 @@ export const FREE_PROVIDERS: Provider[] = [
   {
     id: "nvidia",
     name: "NVIDIA NIM (USA)",
-    models: ["deepseek-ai/deepseek-v4.1-flash", "moonshotai/kimi-k3", "z-ai/glm-5.3", "nvidia/nemotron-3-super-120b-a12b"],
+    models: ["deepseek-ai/deepseek-v4.1-flash", "z-ai/glm-5.3", "nvidia/nemotron-3-super-120b-a12b"],
     defaultModel: "deepseek-ai/deepseek-v4.1-flash",
     baseURL: "https://integrate.api.nvidia.com/v1",
     keyURL: "https://build.nvidia.com/",

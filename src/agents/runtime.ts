@@ -6,7 +6,8 @@ import { isStopped } from "../agent/cancel.js";
 import OpenAI from "openai";
 import { createClient, callLLMStream } from "../providers/llm.js";
 import { executeTool, getAllToolDefinitions } from "../tools/registry.js";
-import { shouldAskPermission, requestPermission, describeToolCall, PERMISSION_DENIED_RESULT } from "../tools/permissions.js";
+import { permissionVerdict, requestPermission, describeToolCall, PERMISSION_DENIED_RESULT, PERMISSION_BLOCKED_RESULT } from "../tools/permissions.js";
+import { addAllowRule, ruleFor } from "../config/permissions-store.js";
 import { loadPersistedConfig } from "../config/persist.js";
 import { getPluginToolNames, listLoadedPlugins } from "../config/plugins.js";
 import { getMcpToolNames } from "../mcp/manager.js";
@@ -116,9 +117,17 @@ function toolsFor(expert: Expert, opts: RunExpertOptions = {}): OpenAI.ChatCompl
 }
 
 async function approve(name: string, args: Record<string, unknown>, autoApprove?: RunExpertOptions["autoApprove"]): Promise<boolean> {
-  if (!shouldAskPermission(name) || (await autoApprove?.(name, args))) return true;
+  const verdict = permissionVerdict(name, args);
+  if (verdict !== "ask" || (await autoApprove?.(name, args))) return verdict !== "deny";
   const ui = getToolApprover();
-  if (ui) return ui(describeToolCall(name, args));
+  if (ui) {
+    const answer = await ui(describeToolCall(name, args));
+    if (answer === "always") {
+      addAllowRule(ruleFor(name, args));
+      return true;
+    }
+    return answer === true;
+  }
   return (await requestPermission(name, args)) === "allow";
 }
 
@@ -291,7 +300,7 @@ export async function runExpert(expert: Expert, task: string, opts: RunExpertOpt
           base.writes += w.writes;
           result = w.text;
         } else if (!(await approve(tc.function.name, args, opts.autoApprove))) {
-          result = PERMISSION_DENIED_RESULT;
+          result = permissionVerdict(tc.function.name, args) === "deny" ? PERMISSION_BLOCKED_RESULT : PERMISSION_DENIED_RESULT;
         } else {
           result = await executeTool(tc.function.name, args);
         }

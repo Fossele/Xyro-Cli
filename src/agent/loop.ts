@@ -11,7 +11,9 @@ import { HistoryManager } from "./history.js";
 import { createClient, callLLM, callLLMStream, summarizeHistory, LLMResponse, ModelSwitch, describeError } from "../providers/llm.js";
 import { executeTool, getPlanModeToolDefinitions } from "../tools/registry.js";
 import { END_TURN_TOOL_NAMES } from "../tools/end_turn.js";
-import { requestPermission, shouldAskPermission, describeToolCall, PERMISSION_DENIED_RESULT } from "../tools/permissions.js";
+import { requestPermission, permissionVerdict, describeToolCall, PERMISSION_DENIED_RESULT, PERMISSION_BLOCKED_RESULT } from "../tools/permissions.js";
+import { getPermissionMode, setPermissionMode, addAllowRule, ruleFor } from "../config/permissions-store.js";
+import { previewToolDiff } from "../tools/preview.js";
 import { DEFAULT_MODEL, DEFAULT_MAX_TOOL_CALLS, CONTEXT_WINDOW_WARN_TOKENS, POST_TURN_COMPACT_TOKENS } from "../config/constants.js";
 import {
   renderAssistant,
@@ -45,8 +47,12 @@ export interface AgentOutput {
   onDispatch?(team: { name: string; title: string; why: string }[]): void;
   /** A short status line (intent guard, privacy shield…) */
   onNotice?(text: string, kind: "info" | "warn"): void;
-  /** Ask the user to approve a mutating/exec tool call (TUI modal). */
-  requestPermission?(label: string): Promise<boolean>;
+  /** Ask the user to approve a mutating/exec tool call (TUI modal).
+   *  "always" persists an allow rule for this exact call; diff is a plain
+   *  unified diff for write/edit previews. */
+  requestPermission?(label: string, diff?: string[]): Promise<boolean | "always">;
+  /** The permission mode changed (plan approved, Shift+Tab, …). */
+  onPermissionMode?(mode: "ask" | "accept-edits" | "plan" | "yolo"): void;
 }
 
 /** Human-readable target for a tool call: the path, command, pattern, … */
@@ -445,7 +451,10 @@ export class Agent {
     this.client = createClient(opts.baseURL, opts.apiKey);
     this.model = opts.model || DEFAULT_MODEL;
     this.maxToolCalls = opts.maxToolCalls || DEFAULT_MAX_TOOL_CALLS;
-    this.history = new HistoryManager();
+        this.history = new HistoryManager();
+    if (getPermissionMode() === "plan") {
+      this.history.setPlanMode(true);
+    }
   }
 
   setModel(model: string): void {
@@ -511,6 +520,30 @@ export class Agent {
     if (!summary) return null;
     this.history.resetWithSummary(summary);
     return summary;
+  }
+
+
+  /** Cycle permission mode: ask -> accept-edits -> plan -> yolo -> ask */
+  cyclePermissionMode(): string {
+    const modes: Array<"ask" | "accept-edits" | "plan" | "yolo"> = ["ask", "accept-edits", "plan", "yolo"];
+    const current = getPermissionMode();
+    const idx = modes.indexOf(current);
+    const next = modes[(idx + 1) % modes.length];
+    setPermissionMode(next);
+    this.setPlanMode(next === "plan");
+    this.output?.onPermissionMode?.(next);
+    return next;
+  }
+
+  /** Force a permission mode (Tab persona, exit_plan, settings panel). */
+  applyPermissionMode(mode: "ask" | "accept-edits" | "plan" | "yolo"): void {
+    setPermissionMode(mode);
+    this.setPlanMode(mode === "plan");
+    this.output?.onPermissionMode?.(mode);
+  }
+
+  getCurrentPermissionMode(): string {
+    return getPermissionMode();
   }
 
   async run(input: string): Promise<void> {
@@ -732,14 +765,26 @@ export class Agent {
           break;
         }
 
-        // Permission gate: mutating/exec tools need user approval
-        let allowed = true;
-        if (shouldAskPermission(name)) {
-          allowed = this.output
-            ? this.output.requestPermission
-              ? await this.output.requestPermission(describeToolCall(name, args))
-              : false
-            : (await requestPermission(name, args)) === "allow";
+        // Permission gate: deny rules block, allow rules run, the rest asks.
+        const verdict = permissionVerdict(name, args);
+        let allowed = verdict !== "deny";
+        if (verdict === "ask") {
+          if (this.output) {
+            if (this.output.requestPermission) {
+              const diff = previewToolDiff(name, args) ?? undefined;
+              const answer = await this.output.requestPermission(describeToolCall(name, args), diff);
+              if (answer === "always") {
+                addAllowRule(ruleFor(name, args));
+                allowed = true;
+              } else {
+                allowed = answer === true;
+              }
+            } else {
+              allowed = false;
+            }
+          } else {
+            allowed = (await requestPermission(name, args)) === "allow";
+          }
         }
 
         const start = performance.now();
@@ -751,7 +796,18 @@ export class Agent {
           if (useTTY) renderToolRunning(name);
         }
 
-        const result = allowed ? await executeTool(name, args) : PERMISSION_DENIED_RESULT;
+        const result = allowed
+          ? await executeTool(name, args)
+          : verdict === "deny"
+            ? PERMISSION_BLOCKED_RESULT
+            : PERMISSION_DENIED_RESULT;
+        // Approving exit_plan really leaves plan mode (otherwise the next
+        // request is still restricted to read-only tools and work never starts).
+        if (allowed && name === "exit_plan" && result.trimStart().startsWith("✅")) {
+          this.setPlanMode(false);
+          setPermissionMode("ask");
+          this.output?.onPermissionMode?.(getPermissionMode());
+        }
         if (allowed && FILE_CHANGING_TOOLS.has(name) && !result.startsWith("❌")) changedFiles = true;
         toolsUsed.push(name);
         if (!allowed) {
