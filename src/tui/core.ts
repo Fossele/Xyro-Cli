@@ -28,6 +28,11 @@ let height = 24;
 let resizeListener: (() => void) | null = null;
 let keyHandler: ((key: string) => void) | null = null;
 
+
+let lastSerializedLines: string[] = [];
+let lastWidth = 0;
+let lastHeight = 0;
+
 // ── Mouse events (SGR encoding) ─────────────────────────────────────────────
 
 export interface MouseEvt {
@@ -325,9 +330,36 @@ export function paintFrame(content: ScrollRegion, bottom: RenderLine[], top: Ren
   rows.push(...bottom);
   if (frameFilter) rows = frameFilter(rows, width, height);
 
+  //copy the current frame to a serialized array of strings to compare 
+  const currentSerialized = rows.map((r) => rowToAnsi(r, width)); 
+
+
+  // If dimensions changed OR any line text/style differs, we need to redraw
+  const dimensionsChanged = width !== lastWidth || height !== lastHeight;
+  let hasChanges = dimensionsChanged || currentSerialized.length !== lastSerializedLines.length;
+
+  if(!hasChanges) {
+    for (let i = 0; i < currentSerialized.length; i++) {
+      if (currentSerialized[i] !== lastSerializedLines[i]) {
+        hasChanges = true;
+        break;
+      }
+    }
+  }
+  //stops if there are no changes to the screen, preventing flickering and unnecessary redraws
+  if (!hasChanges) {
+      return ;
+  }
+
+
+  lastWidth = width;
+  lastHeight = height;
+  lastSerializedLines = currentSerialized;
+  
   // Synchronized output (CSI ?2026) so terminals show the frame atomically
+
   let buf = `${ESC}?2026h${ESC}H`;
-  for (const r of rows) buf += rowToAnsi(r, width);
+  for (const s of currentSerialized) buf += s;
   OUT.write(buf + `${ESC}?2026l`);
 }
 
