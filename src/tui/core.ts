@@ -25,6 +25,10 @@ const OUT = process.stdout;
 let initialized = false;
 let width = 80;
 let height = 24;
+// Last frame actually written, for row-level differential painting.
+let lastRows: string[] = [];
+let lastWidth = -1;
+let lastHeight = -1;
 let resizeListener: (() => void) | null = null;
 let keyHandler: ((key: string) => void) | null = null;
 
@@ -100,8 +104,12 @@ function processInputBuffer(): void {
 export function tuiInit(onKey: (key: string) => void, onResize?: () => void, onMouse?: (e: MouseEvt) => void): void {
   if (initialized) return;
   initialized = true;
+  lastRows = [];
+  lastWidth = -1;
+  lastHeight = -1;
   // Alt screen + hide cursor + button-event mouse tracking with SGR coordinates
-  OUT.write(`${ESC}?1049h${ESC}?25l${ESC}?1002h${ESC}?1006h${ESC}2J`);
+  // + bracketed paste so multi-line pastes arrive as text, not Enter keys.
+  OUT.write(`${ESC}?1049h${ESC}?25l${ESC}?1002h${ESC}?1006h${ESC}?2004h${ESC}2J`);
   if (process.stdin.isTTY) process.stdin.setRawMode(true);
   process.stdin.resume();
   keyHandler = onKey;
@@ -124,16 +132,29 @@ export function tuiInit(onKey: (key: string) => void, onResize?: () => void, onM
 export function tuiExit(): void {
   if (!initialized) return;
   initialized = false;
-  // Disable mouse tracking before leaving the alt screen
-  OUT.write(`${ESC}?1006l${ESC}?1002l${ESC}?25h${ESC}?1049l`);
+  // Disable bracketed paste + mouse tracking before leaving the alt screen
+  OUT.write(`${ESC}?2004l${ESC}?1006l${ESC}?1002l${ESC}?25h${ESC}?1049l`);
   if (process.stdin.isTTY) process.stdin.setRawMode(false);
   if (resizeListener) process.stdout.off("resize", resizeListener);
   inputBuf = "";
   mouseHandler = null;
+  lastRows = [];
+  lastWidth = -1;
+  lastHeight = -1;
 }
 
 export function tuiSize(): { width: number; height: number } {
   return { width, height };
+}
+
+/**
+ * Desktop notification through OSC 9 (iTerm2, WezTerm, kitty, Ghostty…).
+ * Unknown terminals ignore it; XYRO_NO_NOTIFY=1 disables it.
+ */
+export function notify(message: string): void {
+  if (!initialized || process.env.XYRO_NO_NOTIFY === "1") return;
+  const text = message.replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 300);
+  OUT.write(`${OSC}9;${text}\u0007`);
 }
 
 // Split a chunk into logical keystrokes (escape sequences stay whole)
@@ -363,6 +384,16 @@ export function paintFrame(content: ScrollRegion, bottom: RenderLine[], top: Ren
   OUT.write(buf + `${ESC}?2026l`);
 }
 
+/**
+ * Drop the diff cache (theme swap, external full-screen write, …). The next
+ * frame is emitted in full.
+ */
+export function invalidateFrame(): void {
+  lastRows = [];
+  lastWidth = -1;
+  lastHeight = -1;
+}
+
 function rowToAnsi(row: RenderLine, w: number): string {
   const parts: string[] = [];
   let col = 0;
@@ -378,13 +409,17 @@ function rowToAnsi(row: RenderLine, w: number): string {
     col += vw;
   }
   if (col < w) parts.push(" ".repeat(w - col));
-  return parts.join("") + "\n";
+  return parts.join("");
 }
 
 /** Paint a single row at a 1-based screen row position (overlay compositing) */
 export function paintRowOverlay(row: RenderLine, screenY: number, w = width): void {
   if (screenY < 1 || screenY > height) return;
-  OUT.write(`${ESC}${screenY};1H${rowToAnsi(row, w)}`);
+  const painted = rowToAnsi(row, w);
+  OUT.write(`${ESC}${screenY};1H${painted}`);
+  // Keep the diff cache honest: the next frame repaints this row when the
+  // overlay moves or disappears.
+  if (screenY <= lastRows.length) lastRows[screenY - 1] = painted;
 }
 
 export function visualWidth(text: string): number {

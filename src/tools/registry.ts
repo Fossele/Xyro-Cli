@@ -59,7 +59,7 @@ import { repoMap, multiEdit, runTests, diagnostics } from "./power.js";
 import { postNote, formatNotes } from "../agents/team-board.js";
 import { bgStart, bgOutput, bgStop, bgList } from "./background.js";
 import { webSearch } from "./websearch.js";
-import { proposePlan } from "./plan.js";
+import { proposePlan, exitPlan } from "./plan.js";
 import { loadPlugins } from "../config/plugins.js";
 import { runHooks } from "../agent/hooks.js";
 import { pathsTouchedBy, recordBeforeChange } from "../agent/checkpoints.js";
@@ -629,6 +629,16 @@ const builtinTools: Tool[] = [
     (args) => proposePlan(args)
   ),
   defineTool(
+    "exit_plan",
+    "Present the final plan and ask the user to approve before leaving plan mode and starting implementation.",
+    z.object({
+      plan: z.string().describe("The full plan to present"),
+      steps: z.array(z.string()).optional().describe("Optional step list"),
+      summary: z.string().optional().describe("Short summary"),
+    }),
+    (args) => exitPlan(args)
+  ),
+  defineTool(
     "git_add",
     "Stage files for commit",
     z.object({
@@ -843,7 +853,7 @@ export function getToolDefinitions(): OpenAI.ChatCompletionTool[] {
 /** Read-only tools: what XYRO may use in plan mode (no writes, no commands, no network). */
 const PLAN_MODE_TOOLS = new Set([
   "read_file", "list_files", "glob", "search_code", "find_files", "repo_map", "ast_inspect_file", "ast_find_symbol",
-  "write_todos", "propose_plan", "end_turn", "task_completed", "team_notes", "intent_check", "skill_search", "skill_load",
+  "write_todos", "propose_plan", "exit_plan", "end_turn", "task_completed", "team_notes", "intent_check", "skill_search", "skill_load",
   "git_status", "git_diff", "git_log", "git_branch", "git_show", "git_diff_staged", "git_diff_unstaged", "git_pr_view",
 ]);
 
@@ -864,7 +874,10 @@ const READ_PATH_TOOLS = new Set(["read_file", "ast_inspect_file"]);
 async function askOutsideRead(folder: string): Promise<boolean> {
   const label = `Read outside the project: ${folder}`;
   const ui = getToolApprover();
-  if (ui) return ui(label);
+  if (ui) {
+    const answer = await ui(label);
+    return answer === true || answer === "always";
+  }
   if (process.env.XYRO_ALLOW_OUTSIDE === "1") return true;
   if (!canPromptUser()) return false; // scripts / CI: never wander off
   return (await requestPermission("read_outside_project", { path: folder })) === "allow";
